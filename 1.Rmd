@@ -1,0 +1,458 @@
+---
+title: "STATS 500 Project"
+author: 'Name: Yifeng Huang     UMID: 09130484    Email: hyif@umich.edu'
+date: "2025-12-13"
+output:
+  pdf_document:
+    fig_caption: true
+    toc: false
+  html_document:
+    toc: false
+    df_print: paged
+header-includes:
+  - \usepackage{float}
+  - \usepackage{setspace}
+  - \onehalfspacing
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+# 1. Introduction
+
+Urban micromobility systems, such as shared scooters and bicycles, have become an important component of transportation networks in many U.S. cities. In Austin, shared micromobility offers a flexible option for short urban trips and complements public transit. Understanding how these systems are used is valuable for city planners, policymakers, and operators, as trip-level patterns can inform infrastructure planning, fleet management, and operational decisions.
+
+In this project, we analyze all shared micromobility trips recorded in Austin during 2022. The dataset contains detailed trip-level information, including trip duration, distance traveled, time of day, day of week, month, vehicle type, and spatial indicators of trip origin. With over 850,000 recorded trips, the data provide a rich basis for examining usage patterns and factors associated with variation in trip length.
+
+Our analysis addresses two related objectives. First, we examine how temporal, spatial, and vehicle-related factors are associated with trip duration after adjusting for trip distance. Second, we distinguish short from long trips by modeling the probability that a trip exceeds ten minutes. Together, these analyses offer insight into how micromobility systems are used and which trip characteristics most strongly influence trip length.
+
+
+\vspace{1.2em}
+
+# 2. Data Description
+
+```{r load-data}
+library(data.table)
+
+df <- fread("C:/Users/Bob/Desktop/Shared_Micromobility_Vehicle_Trips_2022.csv")
+
+dim(df)
+names(df)
+```
+
+The dataset used in this project is the \textit{Shared Micromobility Vehicle Trips} dataset provided by the City of Austin Open Data Portal. We restrict attention to trips recorded in 2022, yielding a dataset with 858,100 trip-level observations and 18 variables. Each row represents a single completed trip made by a shared micromobility vehicle, including e--scooters and bicycles.
+
+Key variables describe vehicle characteristics, trip attributes, timing, and spatial context. In particular, the data record the \textbf{Vehicle Type}, \textbf{Trip Duration} (total ride duration in seconds), and \textbf{Trip Distance} (total distance traveled), along with \textbf{Start Time} and \textbf{End Time} timestamps. Temporal indicators such as \textbf{Month}, \textbf{Hour}, and \textbf{Day of Week} capture when trips occur, while \textbf{Council District (Start / End)} provides coarse spatial information on where trips begin and end. Together, these variables offer detailed temporal and spatial coverage for analyzing usage patterns, trip duration, and variation across vehicle types and locations. Because the full 2018--2022 dataset contains over 15 million observations, focusing on the 2022 subset allows efficient computation while retaining sufficient sample size for reliable statistical inference.
+
+
+
+## 2.1 Data Cleaning
+```{r clean-data}
+
+# --- 0. Ensure key numeric variables are numeric ---
+df$`Trip Duration` <- as.numeric(df$`Trip Duration`)
+df$`Trip Distance` <- as.numeric(df$`Trip Distance`)
+df$Hour            <- as.numeric(df$Hour)
+df$Month           <- as.numeric(df$Month)
+df$`Day of Week`   <- as.numeric(df$`Day of Week`)
+
+# 1. Remove trips with zero duration or distance
+df <- df[`Trip Duration` > 0 & `Trip Distance` > 0]
+
+# 2. Convert "None" or empty strings to NA for selected categorical fields
+to_na <- function(x) {
+  x[x == "None" | x == "" | is.na(x)] <- NA
+  return(x)
+}
+
+df$`Council District (Start)` <- to_na(df$`Council District (Start)`)
+df$`Council District (End)`   <- to_na(df$`Council District (End)`)
+df$`Census Tract Start`       <- to_na(df$`Census Tract Start`)
+df$`Census Tract End`         <- to_na(df$`Census Tract End`)
+
+# 3. Create long-trip indicator (> 600 seconds)
+df$long_trip <- ifelse(df$`Trip Duration` > 600, 1, 0)
+
+# 4. Create log-duration variable
+df$log_duration <- log(df$`Trip Duration`)
+
+# 5. Create modeling dataset (only variables used in models, complete cases)
+analysis_vars <- c("Trip Duration",
+                   "Trip Distance",
+                   "Vehicle Type",
+                   "Hour",
+                   "Day of Week",
+                   "Month",
+                   "Council District (Start)",
+                   "long_trip",
+                   "log_duration")
+
+df_model <- na.omit(df[, ..analysis_vars])
+
+# Check sizes
+dim(df)       # cleaned full data (keeps most columns)
+dim(df_model) # modeling data (9 variables, complete cases)
+
+```
+
+To ensure data quality and consistency, several preprocessing steps were applied prior to analysis. Trips with non-positive duration or distance were removed, as these indicate incomplete or erroneous records. Categorical variables containing the string “None” or empty entries were recoded as missing, and observations were retained only if all variables required for modeling—trip duration, trip distance, vehicle type, hour of day, day of week, month, and council district of trip origin—were observed.
+
+Two derived variables were then constructed. A binary indicator for long trips was defined as 1 if trip duration exceeded 600 seconds (10 minutes) and 0 otherwise, reflecting an operational distinction between short and longer rides. Because trip duration is strongly right-skewed, a log-transformed duration variable was also created to stabilize variance and improve model fit in the linear regression analysis.
+
+From the original 2022 dataset containing 858,100 trips and 18 variables, these steps yield a cleaned working dataset with 294,410 observations and 20 variables (including derived variables). Restricting further to complete cases on all modeling variables produces a final analytic dataset with 294,309 observations and 9 variables.
+
+
+
+
+## 2.2 Exploratory summaries
+
+```{r eda-summary}
+# Summary statistics for trip duration (seconds) and trip distance
+summary(df_model[, .(`Trip Duration`, `Trip Distance`)])
+
+# Distribution of vehicle types
+table(df_model$`Vehicle Type`)
+
+# Proportion of long trips (> 10 minutes)
+mean(df_model$long_trip)
+```
+
+```{r eda-plots, fig.width=6, fig.height=3, fig.cap="Distributions of trip duration and trip distance"}
+# Set plotting layout (1 row, 2 columns)
+par(mfrow = c(1, 2))
+
+# Histogram of trip duration (converted to minutes), limited to 0–60 minutes
+hist(df_model$`Trip Duration` / 60,
+     breaks = 50,
+     xlim   = c(0, 60),
+     xlab   = "Trip duration (minutes)",
+     main   = "Histogram of trip duration")
+
+# Histogram of trip distance
+hist(df_model$`Trip Distance`,
+     breaks = 50,
+     xlab   = "Trip distance",
+     main   = "Histogram of trip distance")
+
+# Reset plotting layout
+par(mfrow = c(1, 1))
+```
+
+
+Above we summarize key characteristics of the cleaned analytic dataset.  
+The median trip duration is **225 seconds** (approximately 3.75 minutes), and the interquartile range spans from 150 to 342 seconds. Trip duration is strongly right-skewed, with most rides lasting fewer than 10 minutes. Trip distances exhibit a similar right-skewed pattern, with a median of **564 units** and an upper tail extending toward the dataset’s maximum value.
+
+The majority of trips involve **scooters** (over 290,000 observations in the modeling dataset), while bicycles account for a smaller share and mopeds are rare. Approximately **6.2%** of all trips exceed ten minutes, indicating that long trips represent a relatively small fraction of overall system usage.
+
+The histogram (Figure 1) of trip duration, displayed in minutes, highlights the concentration of trips under 10 minutes and the rapid decline in frequency as duration increases. The histogram of trip distance shows a steady rise and a flatter right tail, suggesting greater variability in how far users travel compared with how long they ride. These patterns underscore the importance of adjusting for trip distance when modeling duration and motivate the log transformation used in subsequent analyses.
+
+\vspace{1.2em}
+
+
+# 3. Research Questions
+
+In this project, we focus on trip-level micromobility usage in Austin during the
+year 2022 and address the following research questions.
+
+\begin{enumerate}
+    \item \textbf{Factors associated with trip duration.}  
+    Trip duration is a fundamental outcome that reflects both user behavior and
+    system performance. Understanding which factors are associated with longer
+    or shorter trips can inform infrastructure planning, pricing strategies, and
+    service availability.  
+    Among all shared micromobility trips in 2022, what factors are associated with
+    trip duration? In particular, after controlling for trip distance, do temporal
+    characteristics (hour of day, day of week, month), vehicle type (scooter versus
+    bicycle), and spatial characteristics (council district of trip origin) show
+    systematic associations with (log) trip duration?
+    
+    \item \textbf{Predicting long trips.}  
+    Distinguishing short trips from longer ones is important from both operational
+    and policy perspectives, as long trips may place different demands on
+    infrastructure, vehicle availability, and maintenance. Identifying the
+    conditions under which long trips are more likely can therefore inform
+    targeted interventions and resource allocation.  
+    Which trip-level covariates are predictive of whether a trip lasts longer than
+    10 minutes? In particular, does the probability of a long trip differ by vehicle
+    type and time of day after adjusting for distance and origin council district?
+\end{enumerate}
+
+
+
+\vspace{1.2em}
+
+
+# 4. Methods
+
+This section describes the statistical models used to address the research questions.
+The analysis proceeds in two stages. First, we fit a multiple linear regression model for
+log-transformed trip duration, using trip distance and a set of temporal, vehicle, and
+spatial covariates as predictors. Second, we fit a logistic regression model for the
+probability that a trip exceeds ten minutes. 
+
+## 4.1 Linear regression model for log trip duration
+
+To study factors associated with trip duration, we model the log-transformed duration as
+a function of trip distance, vehicle type, time of day, day of week, month, and the
+council district of trip origin. Let \(Y_i\) denote the trip duration in seconds for trip
+\(i\), and let \(X_{i,\text{dist}}\) denote the trip distance. The response variable is
+defined as
+\[
+\log(Y_i) = \log(\text{Trip Duration}_i),
+\]
+and we fit the multiple linear regression model
+\[
+\log(Y_i)
+= \beta_0
++ \beta_1 X_{i,\text{dist}}
++ \boldsymbol{\gamma}^{\top} \mathbf{Z}_{i,\text{veh}}
++ \boldsymbol{\delta}^{\top} \mathbf{Z}_{i,\text{time}}
++ \boldsymbol{\eta}^{\top} \mathbf{Z}_{i,\text{space}}
++ \varepsilon_i,
+\]
+where \(\mathbf{Z}_{i,\text{veh}}\) contains indicator variables for vehicle type,
+\(\mathbf{Z}_{i,\text{time}}\) contains indicators for hour of day, day of week, and
+month, and \(\mathbf{Z}_{i,\text{space}}\) contains indicators for the council district
+of trip origin. The error terms \(\varepsilon_i\) are assumed to be independent with mean
+zero and constant variance. Under this model, \(\exp(\beta_1)\) represents the
+multiplicative change in expected trip duration associated with a one-unit increase in
+trip distance, holding all other covariates fixed.
+
+In implementation, trip distance is treated as a continuous predictor, while vehicle
+type, hour, day of week, month, and council district are included as categorical factors.
+Scooter is used as the reference vehicle type; Sunday, hour 0 (00:00–00:59), January, and
+Council District 0 serve as the reference categories for the temporal and spatial
+variables. The model is estimated by ordinary least squares using the cleaned analytic
+dataset described in Section 2.1.
+
+
+```{r methods-linear, include=FALSE}
+# Create factor versions of categorical predictors for the linear model
+df_model$VehicleType <- factor(df_model$`Vehicle Type`)
+df_model$Hour_f      <- factor(df_model$Hour)
+df_model$DOW_f       <- factor(df_model$`Day of Week`)
+df_model$Month_f     <- factor(df_model$Month)
+df_model$CDStart_f   <- factor(df_model$`Council District (Start)`)
+
+# Fit multiple linear regression for log trip duration
+lm_duration <- lm(
+  log_duration ~ `Trip Distance` +
+    VehicleType + Hour_f + DOW_f + Month_f + CDStart_f,
+  data = df_model
+)
+
+# The fitted object lm_duration will be summarized in the Results section.
+```
+
+## 4.2 Logistic regression model for long trips
+
+To address the second research question—predicting whether a trip lasts longer than ten
+minutes—we fit a logistic regression model using the binary indicator
+\[
+L_i =
+\begin{cases}
+1, & \text{if trip duration exceeds 600 seconds},\\
+0, & \text{otherwise}.
+\end{cases}
+\]
+Let \(p_i = \Pr(L_i = 1)\) denote the probability that trip \(i\) is a long trip. The
+log-odds of a long trip are modeled as
+\[
+\log\left(\frac{p_i}{1 - p_i}\right)
+= \alpha_0
++ \alpha_1 X_{i,\text{dist}}
++ \boldsymbol{\theta}^{\top} \mathbf{Z}_{i,\text{veh}}
++ \boldsymbol{\phi}^{\top} \mathbf{Z}_{i,\text{time}}
++ \boldsymbol{\psi}^{\top} \mathbf{Z}_{i,\text{space}},
+\]
+where \(\mathbf{Z}_{i,\text{veh}}\) contains indicator variables for vehicle type (with
+scooter as the reference category), \(\mathbf{Z}_{i,\text{time}}\) contains indicators
+for hour of day, day of week, and month, and \(\mathbf{Z}_{i,\text{space}}\) contains
+indicators for the council district of trip origin.
+
+Under this model, \(\exp(\alpha_1)\) represents the multiplicative change in the odds of
+taking a long trip associated with a one-unit increase in trip distance, while
+exponentiated coefficients for the categorical predictors correspond to odds ratios
+relative to their reference categories. The model is estimated via maximum likelihood
+using the cleaned analytic dataset described in Section 2.1, and results are examined in
+Section 5.
+
+
+```{r methods-logistic, include=FALSE}
+# Fit logistic regression model for long-trip indicator
+glm_long <- glm(
+  long_trip ~ `Trip Distance` +
+    VehicleType + Hour_f + DOW_f + Month_f + CDStart_f,
+  data = df_model,
+  family = binomial(link = "logit")
+)
+
+# The fitted object glm_long will be summarized in the Results section.
+```
+
+
+\vspace{1.2em}
+
+
+# 5. Results
+
+In this section we present the results from the linear regression model for
+log-transformed trip duration and from the logistic regression model predicting
+whether a trip exceeds ten minutes. All models were fitted using the cleaned
+analytic dataset described in Section 2, containing 294,309 complete
+observations.
+
+
+## 5.1 Linear regression results
+
+```{r}
+summary(lm_duration)
+
+```
+
+```{r fig.width=5.5, fig.height=3.3, fig.pos='H', fig.cap="Residuals vs Fitted values (sampled 1000 points)"}
+
+set.seed(1)
+
+idx <- sample(length(residuals(lm_duration)), 1000)
+
+res <- residuals(lm_duration)[idx]
+fit <- fitted(lm_duration)[idx]
+
+plot(fit, res,
+     pch = 16,
+     cex = 0.5,
+     col = rgb(0,0,0,0.25),
+     xlab = "Fitted values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted (sampled)")
+
+sm <- lowess(fit, res)
+lines(lowess(fit, res), col = "blue", lwd = 2)
+
+abline(h = 0, lty = 2)
+
+
+```
+
+
+The regression output in this subsection reports the estimated coefficients from a multiple linear regression model for $\log(\text{Trip Duration})$. The model explains a moderate portion of the variability in trip duration, with $R^2 = 0.2057$ and adjusted $R^2 = 0.2056$. Despite substantial heterogeneity across trips, the global F-test indicates that the model is highly statistically significant ($p < 2 \times 10^{-16}$).
+
+Figure 2 presents a diagnostic \textbf{Residuals vs Fitted} plot based on a random subsample of 1,000 observations (drawn from nearly 300,000 total trips) to avoid overplotting. The residuals exhibit no strong curvature or funnel shape, and the loess smoothing curve remains close to zero across the fitted-value range, suggesting that the linearity and constant-variance assumptions are reasonably satisfied for the log-transformed outcome.
+
+### **Effect of trip distance**
+Trip distance is the strongest predictor of trip duration. The estimated coefficient is $\widehat{\beta}_{\text{dist}} = 9.786 \times 10^{-4}$ ($p < 2 \times 10^{-16}$), implying that each additional unit of distance increases the expected duration by approximately $0.1\%$, holding other covariates fixed.
+
+### **Effect of vehicle type**
+Relative to scooters, bicycle trips are substantially longer, with $\widehat{\beta}_{\text{bicycle}} = 0.7234$ ($p < 2 \times 10^{-16}$), corresponding to $\exp(0.7234) \approx 2.06$. Mopeds, though rare, exhibit a similarly large positive association.
+
+### **Temporal effects**
+Several hour-of-day and day-of-week indicators are statistically significant. Morning (8--12) and late-night (22--2) hours tend to have shorter expected durations, while weekend effects—particularly Friday and Saturday—are positive, corresponding to approximately $9$--$11\%$ longer durations relative to the reference day.
+
+### **Month and spatial effects**
+Some months differ from January (e.g., February: $\widehat{\beta} = -0.0195$; March: $\widehat{\beta} = 0.0375$), consistent with seasonal variation in travel behavior. In addition, several council districts (e.g., Districts 1, 3, 4, 7, 8, and 9) show significantly positive coefficients, indicating longer expected durations for trips beginning in central or higher-density areas.
+
+
+## 5.2 Logistic regression results
+
+```{r}
+glm_long <- glm(
+  long_trip ~ `Trip Distance` + VehicleType + Hour_f + DOW_f + Month_f + CDStart_f,
+  data = df_model,
+  family = binomial(link = "logit")
+)
+
+summary(glm_long)
+
+```
+
+```{r fig.cap="Proportion of long trips by hour of day", fig.width=5, fig.height=3, fig.pos='H'}
+library(data.table)
+
+# Compute long-trip proportion by hour
+long_rate <- df_model[, .(long_prop = mean(long_trip)), by = Hour][order(Hour)]
+
+plot(long_rate$Hour, long_rate$long_prop,
+     type = "b", pch = 19,
+     xlab = "Hour of Day",
+     ylab = "Proportion of Long Trips",
+     main = "Long-trip Rate by Hour of Day")
+
+```
+
+
+We next model whether a trip exceeds 10 minutes using logistic regression. The model is highly statistically significant, with a residual deviance of 134,729 on 294,263 degrees of freedom and an AIC of 134,821.
+
+Figure 3 displays the empirical proportion of long trips by hour of day. Long trips are relatively uncommon throughout the day (typically 2–7%), but exhibit a pronounced midday dip around 11:00–13:00 and a steady increase into the evening. This pattern is consistent with the estimated hour-of-day coefficients, which are largely negative during late morning hours and positive during evening hours.
+
+\textbf{Trip distance} remains the dominant predictor. The estimated coefficient is $\widehat{\beta}_{\text{dist}} = 5.99 \times 10^{-4}$ $(p < 2 \times 10^{-16})$, implying $\exp(5.99 \times 10^{-4}) \approx 1.0006$. Thus, each additional unit of distance increases the odds of a long trip by approximately 0.06\%. Although small on a per-unit basis, this effect accumulates over longer distances.
+
+\textbf{Vehicle type} also plays an important role. Relative to scooters, bicycle trips have substantially higher odds of exceeding ten minutes, with $\exp(0.1799) \approx 1.20$, corresponding to roughly 20\% higher odds. Mopeds show a similarly strong positive association, though they are rare in the dataset.
+
+Strong \textbf{hourly effects} are evident. Late morning hours (11–13) are associated with significantly lower odds of long trips, while evening hours (17–21) show positive and statistically significant effects. Together with the pattern in Figure 3, this suggests that mid-day trips tend to be shorter—possibly reflecting quick errands—whereas evening trips are more likely to be longer.
+
+Finally, \textbf{day-of-week effects} remain substantial. Fridays and Saturdays exhibit markedly higher odds of long trips, with $\widehat{\beta}_{\text{DOW\_f5}} = 0.298$ and $\widehat{\beta}_{\text{DOW\_f6}} = 0.333$, corresponding to odds ratios of approximately 1.35 and 1.40. In contrast, after adjusting for distance, temporal factors, and vehicle type, most \textbf{council-district coefficients} are not individually significant, indicating that behavioral and temporal factors dominate geographic variation in predicting long trips.
+
+
+\vspace{1.2em}
+
+
+# 6. Discussion
+
+In this project, we analyzed micromobility trips in Austin during 2022 using two complementary models: a multiple linear regression for $\log(\text{Trip Duration})$ and a logistic regression for whether a trip exceeds ten minutes. The results reveal consistent patterns in how trip length varies with distance, vehicle type, and timing, while indicating that spatial variation at the council-district level plays a more limited role after adjustment for other covariates.
+
+## 6.1 Summary of main findings
+
+Across both models, \textbf{trip distance} is the dominant predictor. Longer distances are strongly associated with longer trip durations and with a higher probability of exceeding ten minutes, even after controlling for temporal, vehicle, and spatial factors.
+
+\textbf{Vehicle type} is also an important determinant. Relative to scooters, bicycle trips are substantially longer in the linear model and have higher odds of being classified as long trips in the logistic model, indicating systematic differences in usage between bicycles and scooters.
+
+Clear \textbf{temporal patterns} are evident. The proportion of long trips shows a pronounced midday dip around 11:00–13:00, followed by a steady increase into the evening. Day-of-week effects are also meaningful, with Friday and Saturday associated with longer durations and higher odds of long trips relative to the reference day.
+
+After adjusting for distance, vehicle type, and temporal variables, \textbf{spatial effects at the council-district level are comparatively weak}, particularly in the logistic regression. This suggests that behavioral and temporal factors dominate geographic variation in predicting whether a trip becomes long.
+
+## 6.2 Behavioral interpretation
+
+The observed temporal patterns likely reflect differences in trip purpose throughout the day. Shorter midday trips may correspond to brief errands or time-constrained travel, whereas evening trips are more likely to be discretionary or recreational and therefore longer.
+
+Differences by vehicle type further support this interpretation. Bicycles appear to be used more often for sustained travel, while scooters are more commonly used for short, quick trips. Factors such as comfort, effort, and speed may contribute to these patterns, although trip purpose is not directly observed in the data.
+
+## 6.3 Implications for operations and planning
+
+From an operational perspective, the higher prevalence of long trips in the evening suggests reduced vehicle turnover during those hours, which may affect availability. Operators could account for this by adjusting rebalancing or deployment strategies later in the day. The strong vehicle-type differences also imply that scooters and bicycles may require distinct management approaches, particularly if bicycles are more frequently used for longer rides.
+
+The relatively weak spatial effects suggest that system-wide temporal dynamics may be more important than broad district-level differences when planning for demand and availability.
+
+## 6.4 Model adequacy
+
+The residuals-versus-fitted diagnostic plot for the linear regression indicates that the log transformation produces a reasonably well-behaved model, with no strong evidence of major violations of linearity or constant variance. Although the overall explanatory power is moderate, this is expected in behavioral transportation data with substantial individual heterogeneity.
+
+
+
+\vspace{1.2em}
+
+# 7. Limitations
+
+Several limitations of this analysis should be acknowledged.
+
+First, the models rely on a limited set of observed covariates. Although trip distance, timing, vehicle type, and council district capture important dimensions of micromobility usage, other potentially influential factors are not available in the data. In particular, weather conditions, traffic congestion, infrastructure quality (e.g., bike lanes), and individual rider characteristics may affect trip duration and the likelihood of taking a long trip. Omission of these variables likely contributes to unexplained variability in both models.
+
+Second, the spatial resolution used in this study is relatively coarse. Council districts are large geographic units and may mask meaningful within-district heterogeneity in land use, street design, or neighborhood activity. Finer spatial information, such as census tracts or precise start locations, could provide more detailed insight into geographic variation in trip behavior.
+
+Third, interpretation of temporal effects is limited by the absence of direct information on trip purpose. Differences across hours of day and days of week likely reflect underlying behaviors such as commuting, recreation, or errands, but these motivations cannot be directly observed. Accordingly, temporal coefficients should be interpreted as associations rather than causal effects.
+
+Finally, although the log transformation improves model behavior, the explanatory power of the linear regression remains moderate. This reflects the inherent heterogeneity of individual travel behavior and suggests that additional covariates or more flexible modeling approaches may be needed to capture finer-scale variation.
+
+Despite these limitations, the large sample size and consistency of results across the linear and logistic models support the robustness of the main findings, particularly regarding the roles of distance, vehicle type, and time of day.
+
+
+
+
+
+
+
+
+
